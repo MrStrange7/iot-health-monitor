@@ -1,0 +1,392 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.multioutput import MultiOutputClassifier
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+import warnings
+warnings.filterwarnings('ignore')
+
+class HealthMonitoringModel:
+    def __init__(self):
+        self.scaler = StandardScaler()
+        self.label_encoders = {}
+        self.models = {}
+        self.feature_names = ['heart_rate', 'spo2', 'temperature', 'ecg_rr_interval', 
+                             'ecg_pr_interval', 'ecg_qt_interval', 'ecg_st_elevation',
+                             'age', 'gender', 'systolic_bp', 'diastolic_bp']
+        self.condition_names = ['fever', 'hypoxia', 'bradycardia', 'tachycardia', 
+                               'arrhythmia', 'heart_failure', 'myocardial_infarction',
+                               'hypertension', 'hypotension']
+    
+    def generate_synthetic_data(self, n_samples=10000):
+        """
+        Generate synthetic health monitoring data with realistic patterns
+        """
+        np.random.seed(42)
+        data = {}
+        
+        # Generate basic demographics
+        data['age'] = np.random.normal(50, 20, n_samples).clip(18, 100)
+        data['gender'] = np.random.choice([0, 1], n_samples)  # 0: Female, 1: Male
+        
+        # Generate vital signs with realistic correlations
+        # Normal ranges and generate with some correlation to age
+        age_factor = (data['age'] - 30) / 100
+        
+        # Heart Rate (60-100 normal)
+        data['heart_rate'] = np.random.normal(75 + age_factor * 10, 15, n_samples).clip(40, 200)
+        
+        # SpO2 (95-100% normal)
+        data['spo2'] = np.random.normal(98 - age_factor * 2, 2, n_samples).clip(70, 100)
+        
+        # Temperature (36.1-37.8°C normal)
+        data['temperature'] = np.random.normal(36.8 + np.random.normal(0, 0.3, n_samples), 0.5, n_samples).clip(35, 42)
+        
+        # Blood Pressure
+        data['systolic_bp'] = np.random.normal(120 + age_factor * 20, 20, n_samples).clip(80, 220)
+        data['diastolic_bp'] = np.random.normal(80 + age_factor * 10, 15, n_samples).clip(50, 140)
+        
+        # ECG Parameters
+        # RR Interval (0.6-1.0s normal)
+        data['ecg_rr_interval'] = 60 / data['heart_rate']  # Calculate from heart rate
+        
+        # PR Interval (0.12-0.20s normal)
+        data['ecg_pr_interval'] = np.random.normal(0.16, 0.03, n_samples).clip(0.08, 0.35)
+        
+        # QT Interval (0.35-0.45s normal)
+        data['ecg_qt_interval'] = np.random.normal(0.40, 0.05, n_samples).clip(0.25, 0.60)
+        
+        # ST Elevation (0-2mm normal)
+        data['ecg_st_elevation'] = np.random.exponential(0.5, n_samples).clip(0, 10)
+        
+        # Generate target conditions based on realistic thresholds
+        conditions = {}
+        
+        # Fever (>38°C)
+        conditions['fever'] = (data['temperature'] > 38.0).astype(int)
+        
+        # Hypoxia (SpO2 < 95%)
+        conditions['hypoxia'] = (data['spo2'] < 95).astype(int)
+        
+        # Bradycardia (HR < 60)
+        conditions['bradycardia'] = (data['heart_rate'] < 60).astype(int)
+        
+        # Tachycardia (HR > 100)
+        conditions['tachycardia'] = (data['heart_rate'] > 100).astype(int)
+        
+        # Arrhythmia (abnormal RR variability or PR/QT intervals)
+        conditions['arrhythmia'] = ((data['ecg_pr_interval'] > 0.20) | 
+                                   (data['ecg_pr_interval'] < 0.12) |
+                                   (data['ecg_qt_interval'] > 0.45) |
+                                   (data['ecg_qt_interval'] < 0.35)).astype(int)
+        
+        # Heart Failure (multiple factors)
+        conditions['heart_failure'] = ((data['spo2'] < 93) & 
+                                      (data['heart_rate'] > 90) &
+                                      (data['ecg_qt_interval'] > 0.43)).astype(int)
+        
+        # Myocardial Infarction (ST elevation + other factors)
+        conditions['myocardial_infarction'] = ((data['ecg_st_elevation'] > 2) &
+                                              ((data['heart_rate'] > 100) | 
+                                               (data['heart_rate'] < 60))).astype(int)
+        
+        # Hypertension (SBP > 140 or DBP > 90)
+        conditions['hypertension'] = ((data['systolic_bp'] > 140) | 
+                                     (data['diastolic_bp'] > 90)).astype(int)
+        
+        # Hypotension (SBP < 90 or DBP < 60)
+        conditions['hypotension'] = ((data['systolic_bp'] < 90) | 
+                                    (data['diastolic_bp'] < 60)).astype(int)
+        
+        # Create DataFrame
+        df = pd.DataFrame(data)
+        
+        # Add conditions
+        for condition, values in conditions.items():
+            df[condition] = values
+        
+        return df
+    
+    def preprocess_data(self, df):
+        """
+        Preprocess the data for training
+        """
+        # Separate features and targets
+        X = df[self.feature_names].copy()
+        y = df[self.condition_names].copy()
+        
+        # Scale features
+        X_scaled = self.scaler.fit_transform(X)
+        X_scaled = pd.DataFrame(X_scaled, columns=self.feature_names)
+        
+        return X_scaled, y
+    
+    def train_models(self, X, y):
+        """
+        Train multiple models for health condition prediction
+        """
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        
+        # Store test data for evaluation
+        self.X_test = X_test
+        self.y_test = y_test
+        
+        print("Training Multiple Models...")
+        
+        # 1. Random Forest (Multi-output)
+        print("Training Random Forest...")
+        rf_model = MultiOutputClassifier(RandomForestClassifier(n_estimators=100, random_state=42))
+        rf_model.fit(X_train, y_train)
+        self.models['random_forest'] = rf_model
+        
+        # 2. Gradient Boosting (Multi-output)
+        print("Training Gradient Boosting...")
+        gb_model = MultiOutputClassifier(GradientBoostingClassifier(n_estimators=100, random_state=42))
+        gb_model.fit(X_train, y_train)
+        self.models['gradient_boosting'] = gb_model
+        
+        # 3. Neural Network (Multi-output)
+        print("Training Neural Network...")
+        nn_model = MultiOutputClassifier(MLPClassifier(hidden_layer_sizes=(100, 50), 
+                                                       max_iter=1000, random_state=42))
+        nn_model.fit(X_train, y_train)
+        self.models['neural_network'] = nn_model
+        
+        # 4. Deep Learning Model with Keras
+        print("Training Deep Learning Model...")
+        self.deep_model = self.build_deep_model(X_train.shape[1], len(self.condition_names))
+        
+        # Train deep model
+        history = self.deep_model.fit(
+            X_train.values, y_train.values,
+            epochs=50,
+            batch_size=32,
+            validation_split=0.2,
+            verbose=0
+        )
+        
+        self.models['deep_learning'] = self.deep_model
+        
+        print("All models trained successfully!")
+        
+        return history
+    
+    def build_deep_model(self, input_dim, output_dim):
+        """
+        Build a deep learning model for multi-output classification
+        """
+        model = keras.Sequential([
+            layers.Dense(128, activation='relu', input_shape=(input_dim,)),
+            layers.Dropout(0.3),
+            layers.Dense(64, activation='relu'),
+            layers.Dropout(0.2),
+            layers.Dense(32, activation='relu'),
+            layers.Dense(output_dim, activation='sigmoid')  # Sigmoid for multi-label classification
+        ])
+        
+        model.compile(
+            optimizer='adam',
+            loss='binary_crossentropy',
+            metrics=['accuracy']
+        )
+        
+        return model
+    
+    def evaluate_models(self):
+        """
+        Evaluate all trained models
+        """
+        results = {}
+        
+        print("Evaluating Models...")
+        print("=" * 50)
+        
+        for model_name, model in self.models.items():
+            if model_name == 'deep_learning':
+                y_pred = (model.predict(self.X_test.values) > 0.5).astype(int)
+            else:
+                y_pred = model.predict(self.X_test)
+            
+            # Calculate accuracy for each condition
+            condition_accuracies = {}
+            for i, condition in enumerate(self.condition_names):
+                acc = accuracy_score(self.y_test.iloc[:, i], y_pred[:, i])
+                condition_accuracies[condition] = acc
+            
+            overall_accuracy = np.mean(list(condition_accuracies.values()))
+            results[model_name] = {
+                'overall_accuracy': overall_accuracy,
+                'condition_accuracies': condition_accuracies
+            }
+            
+            print(f"\n{model_name.upper()} Results:")
+            print(f"Overall Accuracy: {overall_accuracy:.4f}")
+            for condition, acc in condition_accuracies.items():
+                print(f"  {condition}: {acc:.4f}")
+        
+        return results
+    
+    def predict_health_status(self, patient_data, model_name='random_forest'):
+        """
+        Predict health conditions for a single patient
+        """
+        if isinstance(patient_data, dict):
+            # Convert dict to DataFrame
+            patient_df = pd.DataFrame([patient_data])
+        else:
+            patient_df = patient_data.copy()
+        
+        # Ensure all required features are present
+        for feature in self.feature_names:
+            if feature not in patient_df.columns:
+                print(f"Warning: {feature} not found in patient data")
+                return None
+        
+        # Scale the data
+        patient_scaled = self.scaler.transform(patient_df[self.feature_names])
+        
+        # Get predictions
+        model = self.models[model_name]
+        
+        if model_name == 'deep_learning':
+            predictions = (model.predict(patient_scaled) > 0.5).astype(int)
+            probabilities = model.predict(patient_scaled)
+        else:
+            predictions = model.predict(patient_scaled)
+            # Get probabilities if available
+            try:
+                probabilities = model.predict_proba(patient_scaled)
+                # For multi-output, we need to extract probabilities differently
+                if hasattr(probabilities[0], '__len__') and len(probabilities[0]) > 1:
+                    probabilities = np.array([prob[:, 1] for prob in probabilities]).T
+                else:
+                    probabilities = predictions.astype(float)
+            except:
+                probabilities = predictions.astype(float)
+        
+        # Create results dictionary
+        results = {}
+        for i, condition in enumerate(self.condition_names):
+            results[condition] = {
+                'prediction': bool(predictions[0][i]),
+                'probability': float(probabilities[0][i])
+            }
+        
+        return results
+    
+    def get_health_recommendations(self, predictions):
+        """
+        Provide health recommendations based on predictions
+        """
+        recommendations = []
+        
+        if predictions['fever']['prediction']:
+            recommendations.append("🌡️ FEVER DETECTED: Monitor temperature regularly, stay hydrated, consider fever-reducing medication if needed.")
+        
+        if predictions['hypoxia']['prediction']:
+            recommendations.append("🫁 LOW OXYGEN LEVELS: Seek immediate medical attention. This could indicate respiratory issues.")
+        
+        if predictions['bradycardia']['prediction']:
+            recommendations.append("💓 LOW HEART RATE: Monitor closely. May indicate cardiac conduction issues.")
+        
+        if predictions['tachycardia']['prediction']:
+            recommendations.append("💗 HIGH HEART RATE: Check for causes like fever, stress, or cardiac issues.")
+        
+        if predictions['arrhythmia']['prediction']:
+            recommendations.append("💔 IRREGULAR HEARTBEAT: Consider ECG monitoring and cardiology consultation.")
+        
+        if predictions['heart_failure']['prediction']:
+            recommendations.append("❤️ POSSIBLE HEART FAILURE: Urgent medical evaluation needed.")
+        
+        if predictions['myocardial_infarction']['prediction']:
+            recommendations.append("🚨 POSSIBLE HEART ATTACK: SEEK IMMEDIATE EMERGENCY MEDICAL CARE!")
+        
+        if predictions['hypertension']['prediction']:
+            recommendations.append("📈 HIGH BLOOD PRESSURE: Monitor BP regularly, consider lifestyle modifications.")
+        
+        if predictions['hypotension']['prediction']:
+            recommendations.append("📉 LOW BLOOD PRESSURE: Monitor for dizziness, ensure adequate hydration.")
+        
+        if not recommendations:
+            recommendations.append("✅ All vital signs appear normal. Continue regular health monitoring.")
+        
+        return recommendations
+
+# Example usage and demonstration
+def main():
+    # Initialize the model
+    health_model = HealthMonitoringModel()
+    
+    # Generate synthetic data
+    print("Generating synthetic health monitoring data...")
+    df = health_model.generate_synthetic_data(n_samples=5000)
+    
+    print(f"Generated {len(df)} patient records")
+    print(f"Features: {health_model.feature_names}")
+    print(f"Conditions: {health_model.condition_names}")
+    
+    # Display data statistics
+    print("\nDataset Overview:")
+    print(df.describe())
+    
+    # Preprocess data
+    X, y = health_model.preprocess_data(df)
+    
+    # Train models
+    history = health_model.train_models(X, y)
+    
+    # Evaluate models
+    results = health_model.evaluate_models()
+    
+    # Example patient prediction
+    print("\n" + "="*60)
+    print("EXAMPLE PATIENT PREDICTION")
+    print("="*60)
+    
+    # Example patient with concerning vitals
+    patient_example = {
+        'heart_rate': 45,          # Bradycardia
+        'spo2': 92,                # Low oxygen
+        'temperature': 39.2,       # Fever
+        'ecg_rr_interval': 1.33,   # Calculated from HR
+        'ecg_pr_interval': 0.25,   # Prolonged PR interval
+        'ecg_qt_interval': 0.48,   # Prolonged QT
+        'ecg_st_elevation': 3.2,   # ST elevation
+        'age': 65,
+        'gender': 1,               # Male
+        'systolic_bp': 160,        # High
+        'diastolic_bp': 95         # High
+    }
+    
+    # Get predictions
+    predictions = health_model.predict_health_status(patient_example, 'random_forest')
+    
+    if predictions:
+        print("\nPatient Vital Signs:")
+        for key, value in patient_example.items():
+            print(f"  {key}: {value}")
+        
+        print(f"\nPredicted Health Conditions:")
+        for condition, result in predictions.items():
+            status = "⚠️  POSITIVE" if result['prediction'] else "✅ NEGATIVE"
+            prob = result['probability']
+            print(f"  {condition}: {status} (confidence: {prob:.3f})")
+        
+        print(f"\nHealth Recommendations:")
+        recommendations = health_model.get_health_recommendations(predictions)
+        for i, rec in enumerate(recommendations, 1):
+            print(f"{i}. {rec}")
+    
+    return health_model, df, results
+
+if __name__ == "__main__":
+    model, data, evaluation_results = main()
