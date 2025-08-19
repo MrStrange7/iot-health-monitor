@@ -1,92 +1,55 @@
-// ---------------- Required Libraries ----------------
 #include <Wire.h>
 #include "MAX30105.h"
-#include "heartRate.h"
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
-// ---------------- Sensor Pins ----------------
-#define ECG_PIN 34
-#define ONE_WIRE_BUS 4 // DS18B20 data pin on GPIO4 (change if needed)
+#define ONE_WIRE_BUS 5     // DS18B20 data pin
+#define ECG_PIN 34         // AD8232 analog output pin
 
-// ---------------- Sensor Objects ----------------
 MAX30105 particleSensor;
 OneWire oneWire(ONE_WIRE_BUS);
-DallasTemperature tempSensor(&oneWire);
+DallasTemperature sensors(&oneWire);
 
-// ---------------- Variables ----------------
-float temperature = 0.0;
-int ecgValue = 0;
-int32_t irValue, redValue;
-
-const byte RATE_SIZE = 4;
-byte rates[RATE_SIZE];
-byte rateSpot = 0;
-long lastBeat = 0;
-float beatsPerMinute;
-int beatAvg;
-
-// ---------------- Setup ----------------
 void setup() {
   Serial.begin(115200);
-  delay(1000); // Allow time for Serial to initialize
-
-  Serial.println("🔌 Setup starting...");
-
-  // Initialize Temperature Sensor
-  tempSensor.begin();
-  Serial.println("🌡️ Temperature sensor initialized.");
+  delay(1000);
 
   // Initialize MAX30102
   if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
-    Serial.println("❌ MAX30102 not found. Check wiring and power supply.");
-    while (1); // Halt execution
+    Serial.println("MAX30102 not found. Check wiring.");
+    while (1);
   }
-
   particleSensor.setup(); // Use default settings
-  particleSensor.setPulseAmplitudeRed(0x0A);  // Low power
-  particleSensor.setPulseAmplitudeIR(0x0A);   // Low power
-  Serial.println("❤️ MAX30102 initialized.");
+
+  // Initialize DS18B20
+  sensors.begin();
+
+  Serial.println("ESP32 Health Monitor Started");
 }
 
-// ---------------- Main Loop ----------------
 void loop() {
-  // ----------- MAX30102 Readings -----------
-  irValue = particleSensor.getIR();
-  redValue = particleSensor.getRed();
+  // === MAX30102 readings ===
+  long irValue = particleSensor.getIR(); // Raw IR for heart rate calculation
+  long redValue = particleSensor.getRed();
 
-  if (checkForBeat(irValue)) {
-    long delta = millis() - lastBeat;
-    lastBeat = millis();
+  float bpm = particleSensor.getHeartRate();   // Optional, or calculate manually
+  float spo2 = particleSensor.getSpO2();       // Optional, or set placeholder
 
-    beatsPerMinute = 60 / (delta / 1000.0);
+  // === DS18B20 reading ===
+  sensors.requestTemperatures();
+  float temperature = sensors.getTempCByIndex(0);
 
-    if (beatsPerMinute < 255 && beatsPerMinute > 20) {
-      rates[rateSpot++] = (byte)beatsPerMinute;
-      rateSpot %= RATE_SIZE;
+  // === AD8232 ECG reading ===
+  int ecgValue = analogRead(ECG_PIN);
 
-      beatAvg = 0;
-      for (byte i = 0; i < RATE_SIZE; i++)
-        beatAvg += rates[i];
-      beatAvg /= RATE_SIZE;
-    }
-  }
-
-  // ----------- Temperature Readings -----------
-  tempSensor.requestTemperatures();
-  temperature = tempSensor.getTempCByIndex(0);
-
-  // ----------- ECG Reading -----------
-  ecgValue = analogRead(ECG_PIN);
-
-  // ----------- SpO2 Placeholder -----------
-  int spo2 = 0;
-
-  // ----------- Serial Output (CSV Format) -----------
-  Serial.print(beatsPerMinute, 2); Serial.print(",");
-  Serial.print(spo2); Serial.print(",");
-  Serial.print(temperature, 2); Serial.print(",");
+  // === Send CSV data via Serial ===
+  Serial.print(bpm);
+  Serial.print(",");
+  Serial.print(spo2);
+  Serial.print(",");
+  Serial.print(temperature);
+  Serial.print(",");
   Serial.println(ecgValue);
 
-  delay(100); // Small delay to avoid flooding Serial
+  delay(500); // Read every 500ms
 }
