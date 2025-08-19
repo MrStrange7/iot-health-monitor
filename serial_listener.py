@@ -1,126 +1,64 @@
 import serial
 import time
 import pandas as pd
-import numpy as np
-import joblib
+import joblib  # For loading saved ML models
+from health_predictor import predict_health  # Your utility function
 
-# Load models and scaler
-try:
-    vitals_model = joblib.load("D:\\ESP32\\IoT Health Monitor\\ML\\vitals_model_2A.pkl")
-    vitals_scaler = joblib.load("D:\\ESP32\\IoT Health Monitor\\ML\\vitals_scaler_2A.pkl")
-    ecg_model = joblib.load("D:\\ESP32\\IoT Health Monitor\\ML\\kaggle_ecg_model.pkl")
-except FileNotFoundError as e:
-    print(f"Error loading model files: {e}")
-    print("Please ensure the .pkl files are in the specified path.")
-    exit()
-
-# Serial config
-SERIAL_PORT = "COM6"  # Change to your port
+# === CONFIG ===
+SERIAL_PORT = 'COM6'  # Change this to your ESP32 serial port
 BAUD_RATE = 115200
+CSV_LOG_FILE = 'realtime_log.csv'
+MODEL_PATH = 'ML/health_rf_model.pkl'  # Using Random Forest
 
-def parse_line(line):
-    """
-    Parses a single line of comma-separated sensor data.
-    Returns a tuple of (bpm, spo2, temp, ecg) or None if parsing fails.
-    """
-    try:
-        parts = line.strip().split(',')
-        if len(parts) != 4:
-            return None
-        bpm = float(parts[0])
-        spo2 = float(parts[1])
-        temp = float(parts[2])
-        ecg = float(parts[3])
-        return bpm, spo2, temp, ecg
-    except (ValueError, IndexError):
-        # Handles cases where the line is not valid CSV or conversion fails
-        return None
+# Load trained ML model
+model = joblib.load(MODEL_PATH)
 
-def predict_vitals(bpm, spo2, temp):
-    """
-    Predicts a condition based on BPM, SpO2, and temperature using the vitals model.
-    """
-    # Prepare DataFrame with correct column names your vitals model expects
-    df = pd.DataFrame([{
-        "pulse": bpm,
-        "body temperature": temp,
-        "SpO2": spo2
-    }])
-    try:
-        scaled = vitals_scaler.transform(df)
-        pred = vitals_model.predict(scaled)[0]
-        return pred
-    except Exception as e:
-        return f"Vitals prediction error: {e}"
+# Initialize serial connection
+try:
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    print(f"Connected to {SERIAL_PORT} at {BAUD_RATE} baud.")
+except serial.SerialException:
+    print(f"Error: Could not open serial port {SERIAL_PORT}")
+    exit(1)
 
-def predict_ecg(ecg_window):
-    """
-    Predicts a condition from a window of ECG data using the ECG model.
-    The model expects a window of 187 features.
-    """
-    try:
-        # Reshape the list of 187 values into a 2D array for the model
-        arr = np.array(ecg_window).reshape(1, -1)
-        pred = ecg_model.predict(arr)[0]
-        return pred
-    except Exception as e:
-        return f"ECG prediction error: {e}"
+# Initialize CSV logging
+columns = ['BPM', 'SpO2', 'Temperature', 'ECG', 'Prediction']
+try:
+    df = pd.read_csv(CSV_LOG_FILE)
+except FileNotFoundError:
+    df = pd.DataFrame(columns=columns)
+    df.to_csv(CSV_LOG_FILE, index=False)
 
-def main():
-    """
-    Main function to handle serial communication and predictions.
-    """
-    try:
-        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=2)
-        time.sleep(2)  # Wait for ESP32 reset
-        print("Serial port opened successfully.")
-    except Exception as e:
-        print(f"Failed to open serial port: {e}")
-        return
+print("Listening for data... Press Ctrl+C to stop.")
 
-    # ECG window size must match the model's expected input size
-    ECG_WINDOW_SIZE = 187
-    ecg_window = []
+try:
+    while True:
+        line = ser.readline().decode('utf-8').strip()
+        if line:
+            try:
+                # Assuming comma-separated values: BPM,SpO2,Temp,ECG
+                values = [float(x) for x in line.split(',')]
+                if len(values) != 4:
+                    print(f"Unexpected data format: {line}")
+                    continue
 
-    print("Listening for data...")
-    print("-" * 50)
+                bpm, spo2, temp, ecg = values
 
-    try:
-        while True:
-            if ser.in_waiting:
-                line = ser.readline().decode('utf-8', errors='ignore').strip()
-                parsed = parse_line(line)
-                
-                if parsed:
-                    bpm, spo2, temp, ecg = parsed
+                # Prepare dataframe row for prediction
+                input_df = pd.DataFrame([values], columns=['BPM', 'SpO2', 'Temperature', 'ECG'])
+                prediction = predict_health(model, input_df)[0]
 
-                    # Predict vitals condition
-                    vitals_condition = predict_vitals(bpm, spo2, temp)
+                # Append to log
+                df.loc[len(df)] = [bpm, spo2, temp, ecg, prediction]
+                df.to_csv(CSV_LOG_FILE, index=False)
 
-                    # Collect ECG data
-                    ecg_window.append(ecg)
-                    
-                    # Predict ECG condition once the window is full
-                    if len(ecg_window) >= ECG_WINDOW_SIZE:
-                        ecg_condition = predict_ecg(ecg_window)
-                        # Reset the window for the next prediction
-                        ecg_window = []
-                    else:
-                        ecg_condition = f"Collecting ECG data... ({len(ecg_window)}/{ECG_WINDOW_SIZE})"
+                print(f"BPM: {bpm}, SpO2: {spo2}, Temp: {temp}, ECG: {ecg}, Prediction: {prediction}")
 
-                    # Print real-time results
-                    print(f"Vitals → BPM: {bpm:.2f}, SpO2: {spo2}, Temp: {temp:.2f}°C → Condition: {vitals_condition}")
-                    print(f"ECG Health Prediction: {ecg_condition}")
-                    print("-" * 50)
-                else:
-                    # You can uncomment this line for debugging to see any unparsed lines
-                    # print(f"Skipping malformed line: {line}")
-                    pass
-    except KeyboardInterrupt:
-        print("Program terminated by user.")
-    finally:
-        ser.close()
-        print("Serial port closed.")
+            except ValueError:
+                print(f"Error parsing line: {line}")
 
-if __name__ == "__main__":
-    main()
+        time.sleep(0.1)  # Slight delay to avoid overwhelming CPU
+
+except KeyboardInterrupt:
+    print("\nStopped by user.")
+    ser.close()
