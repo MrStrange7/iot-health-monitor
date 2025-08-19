@@ -54,6 +54,7 @@ Using Python script:
 ```
 python ML/train_health_model.py
 ```
+⚠️ Note: For ECG-specific predictions, we later used train_kaggle_ecg_model.ipynb and vitals_model.ipynb for other vitals.
 3️⃣  Upload the desired Arduino sketch to your ESP32 using the Arduino IDE before running the Python scripts.
 
 4️⃣ Test / Simulate Data
